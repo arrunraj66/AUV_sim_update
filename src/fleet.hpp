@@ -8,6 +8,11 @@
 #include "waves.hpp"
 #include "terrain.hpp"
 #include "imgui.h"
+#include "design_model.hpp"
+#include "real_models_mesh.hpp"
+#include "designer_core.hpp"
+#include "remus100.hpp"
+#include <functional>
 #include <filesystem>
 #include <cstring>
 #include <cfloat>
@@ -16,6 +21,9 @@ struct Unit {
     Vehicle veh; int model = 0; int stl = -1;        // stl = index of its own 3D model when it is a custom STL vehicle
     double ui[5] = {0, 0, 0, 0, 0};                  // slider commands (they stay where you put them)
     int id = 0;
+    bool designed = false;                           // built from the AUV Designer or from real data (its 3D model is in stl_models too)
+    int kind = 0;                                    // 0 standard model or STL, 1 designed (editable in the Designer), 2 real vehicle as published
+    int real_id = -1;                                // kind 1 or 2: the real vehicle it started from
 };
 
 struct Fleet {
@@ -29,6 +37,13 @@ struct Fleet {
     double pad[5] = {0, 0, 0, 0, 0};        // gamepad commands
     SDL_GameController* pad_dev = nullptr;
     char stl_path[512] = "";
+    // designs from the AUV Designer
+    std::string design_dir; std::vector<std::string> design_files; int design_sel = 0;
+    dcore::Library lib; int lib_sel = 0;     // saved designs and real vehicles (designer_core.hpp)
+    std::function<void(int)> open_designer;  // set by the Designer: opens it, with this library entry loaded (-1: as it was)
+    bool input_blocked = false;              // the Designer is open: keyboard and gamepad do not drive the vehicle
+    bool paused = false;                     // the Designer is open and 'Pause simulation while open' is on: the vehicles do not step
+    bool stl_show_act = true;               // draw thrusters and fins on an imported STL model
     bool stl_swap = false, stl_flip = false; float stl_len = 1.0f; float stl_col[3] = {0.72f, 0.75f, 0.80f};
     std::string msg, models_dir;
     bool snap_cam = false; float snap_yaw = 0, snap_pitch = -0.2f;
@@ -36,7 +51,7 @@ struct Fleet {
 
     void init() {
         prog = make_program(GLSL_COMMON + VEH_VS, GLSL_COMMON + NOISE + LIGHTING + VEH_FS, "vehicles");
-        for (int i = 0; i < M_STL; ++i) { Spec s = make_spec(i); models[i] = build_model(i, s); models[i].upload(); }
+        for (int i = 0; i < M_STL; ++i) { Spec s = make_spec_ex(i); models[i] = build_model(i, s); models[i].upload(); }
         namespace fs = std::filesystem;
         const char* bp = SDL_GetBasePath(); fs::path base = bp ? fs::path(bp) : fs::current_path(); if (bp) SDL_free((void*)bp);
         fs::path dir = (base / ".." / "models").lexically_normal();
@@ -62,6 +77,7 @@ struct Fleet {
 
     // ------------------------------------------------------------------ deploy / remove
     bool deploy(int model, Vec3f cam_pos, float cam_yaw, const Terrain& T) {
+        if (!MODEL_CHOICE) model = M_TORPEDO;
         Unit u; u.model = model; u.id = next_id++;
         if (model == M_STL) {
             StlInfo info; VModel vm = build_stl(stl_path, stl_swap, stl_flip, stl_len, info);
@@ -82,7 +98,11 @@ struct Fleet {
             s.contact.push_back({hx, 0, 0}); s.contact.push_back({-hx, 0, 0});
             s.chase = 3.0 * s.length; s.note = "Your own 3D model with the Scout's six thrusters and the mass of the water it displaces (neutrally buoyant). Same keys as the Scout.";
             u.veh.s = s; stl_models.push_back(std::move(vm)); u.stl = (int)stl_models.size() - 1;
-        } else u.veh.s = make_spec(model);
+        } else u.veh.s = make_spec_ex(model);
+        return finish_deploy(u, cam_pos, cam_yaw, T);
+    }
+    // place the new vehicle in front of the camera and select it
+    bool finish_deploy(Unit& u, Vec3f cam_pos, float cam_yaw, const Terrain& T) {
         u.veh.rebuild();
         double dist = 8.0 + 3.0 * u.veh.s.length;
         double x = cam_pos.x + std::cos(cam_yaw) * dist, y = cam_pos.y + std::sin(cam_yaw) * dist;
@@ -102,23 +122,82 @@ struct Fleet {
         if (active < 0) cam_mode = 0;
     }
 
+    // ------------------------------------------------------------------ vehicle library: saved designs, real vehicles, deploy and apply
+    std::string find_design_dir() const { return paths::designs_dir(); }          // <project root>/config/designs, whatever the working directory is
+    void refresh_designs() {
+        if (design_dir.empty()) design_dir = find_design_dir();
+        paths::migrate_all(design_dir);                                            // designs an older version left in config/auv move here; 6A presets stay
+        lib.dir = design_dir; lib.refresh(); design_files.clear();
+        for (const dcore::LibEntry& e : lib.items) if (e.kind == dcore::LibEntry::Saved) design_files.push_back(e.name);
+        design_sel = std::max(0, std::min(design_sel, (int)design_files.size() - 1)); lib_sel = std::max(0, std::min(lib_sel, (int)lib.items.size() - 1));
+    }
+    VModel model_for(const design::DesignIn& din, const design::DesignOut& o, const Spec& s, int real_id) const {
+        return real_id == RV_BLUEROV2 ? build_hover(s) : design::build_design_model(din, o, s);
+    }
+    // put a finished vehicle in front of the camera
+    bool deploy_built(const Spec& s, VModel vm, int kind, int real_id, Vec3f cam_pos, float cam_yaw, const Terrain& T) {
+        Unit u; u.model = real_id == RV_BLUEROV2 ? M_HOVER : M_TORPEDO; u.id = next_id++; u.designed = true; u.kind = kind; u.real_id = real_id;
+        u.veh.s = s; vm.upload(); stl_models.push_back(std::move(vm)); u.stl = (int)stl_models.size() - 1;
+        return finish_deploy(u, cam_pos, cam_yaw, T);
+    }
+    // run the designer on a design (with the published overrides of a real base if there is one) and deploy the vehicle with its own 3D model
+    bool deploy_design(const design::DesignIn& din, Vec3f cam_pos, float cam_yaw, const Terrain& T, const dcore::Source& src = dcore::Source{}) {
+        design::DesignOut o; std::vector<std::string> over; Spec s = dcore::build_spec(din, src, &o, &over);
+        if (o.mass <= 0 || o.V <= 0 || o.outline.empty()) { msg = "This design has no hull volume. Open the designer and check the sizes."; return false; }
+        bool ok = deploy_built(s, model_for(din, o, s, -1), 1, src.real_base, cam_pos, cam_yaw, T);
+        if (ok && !o.warnings.empty()) msg += "   (" + std::to_string(o.warnings.size()) + " design warnings, see the designer)";
+        return ok;
+    }
+    // a real vehicle (REMUS 100 Fossen data, Tethys, LAUV, ECA A9, BlueROV2) built from its published numbers
+    bool deploy_real(int id, Vec3f cam_pos, float cam_yaw, const Terrain& T) {
+        if (id < 0 || id >= RV_COUNT) return false;
+        Spec s = make_real_spec(id); return deploy_built(s, build_real_model(id, s), 2, id, cam_pos, cam_yaw, T);
+    }
+    bool deploy_library(int idx, Vec3f cam_pos, float cam_yaw, const Terrain& T) {
+        if (lib.items.empty()) refresh_designs();
+        if (idx < 0 || idx >= (int)lib.items.size()) return false;
+        const dcore::LibEntry& e = lib.items[idx];
+        if (e.kind == dcore::LibEntry::DeployOnly) return deploy_real(e.real_id, cam_pos, cam_yaw, T);
+        design::DesignIn din; dcore::Source src; std::string err;
+        if (!dcore::load_entry(lib, idx, din, src, err)) { msg = err; return false; }
+        if (e.kind != dcore::LibEntry::Saved) din.name = e.name;     // a deployed real vehicle keeps its real name; a saved design keeps the name inside its file
+        return deploy_design(din, cam_pos, cam_yaw, T, src);
+    }
+    bool deploy_design_file(const std::string& name, Vec3f cam_pos, float cam_yaw, const Terrain& T) {
+        if (lib.items.empty()) refresh_designs();
+        int i = lib.find(name); if (i < 0) { msg = "Could not find the design " + name; return false; }
+        return deploy_library(i, cam_pos, cam_yaw, T);
+    }
+    // "Apply to deployed AUV": the selected vehicle gets the new Spec and mesh, keeping position, orientation, speed and depth; the battery keeps its percentage
+    bool apply_design(Unit& u, const design::DesignIn& din, const dcore::Source& src) {
+        design::DesignOut o; std::vector<std::string> over; Spec s = dcore::build_spec(din, src, &o, &over);
+        if (o.mass <= 0 || o.V <= 0 || o.outline.empty()) { msg = "This design has no hull volume."; return false; }
+        VModel vm = model_for(din, o, s, -1); vm.upload();
+        if (u.stl >= 0) { stl_models[u.stl].release(); stl_models[u.stl] = std::move(vm); } else { stl_models.push_back(std::move(vm)); u.stl = (int)stl_models.size() - 1; }
+        dcore::apply_to_vehicle(u.veh, s); u.model = M_TORPEDO; u.designed = true; u.kind = 1; u.real_id = src.real_base;
+        msg = "Applied the design to #" + std::to_string(u.id) + " " + s.name + " (position, orientation, speed and battery percentage kept)."; return true;
+    }
+
     // ------------------------------------------------------------------ input
     void read_input(double dt, bool keyboard_ok) {
         const Uint8* k = SDL_GetKeyboardState(nullptr);
         double tg[5] = {0, 0, 0, 0, 0};
-        if (keyboard_ok) {
-            tg[0] = (k[SDL_SCANCODE_UP] ? 1 : 0) - (k[SDL_SCANCODE_DOWN] ? 1 : 0);
-            tg[1] = (k[SDL_SCANCODE_Z] ? 1 : 0) - (k[SDL_SCANCODE_X] ? 1 : 0);
-            tg[2] = (k[SDL_SCANCODE_R] ? 1 : 0) - (k[SDL_SCANCODE_F] ? 1 : 0);
-            tg[3] = (k[SDL_SCANCODE_T] ? 1 : 0) - (k[SDL_SCANCODE_G] ? 1 : 0);
-            tg[4] = (k[SDL_SCANCODE_LEFT] ? 1 : 0) - (k[SDL_SCANCODE_RIGHT] ? 1 : 0);
+        if (keyboard_ok && !input_blocked) {
+            auto ax = [&](SDL_Scancode a, SDL_Scancode b) { return (k[a] ? 1.0 : 0.0) - (k[b] ? 1.0 : 0.0); };
+            auto pick = [](double a, double b) { return std::fabs(a) > 0 ? a : b; };   // arrows and letters do the same; no cancelling out
+            bool letters = cam_mode != 0;                                              // in the free camera W/A/S/D/Q/E fly the camera instead
+            tg[0] = pick(ax(SDL_SCANCODE_UP, SDL_SCANCODE_DOWN), letters ? ax(SDL_SCANCODE_W, SDL_SCANCODE_S) : 0);
+            tg[1] = pick(ax(SDL_SCANCODE_Z, SDL_SCANCODE_X), letters ? ax(SDL_SCANCODE_Q, SDL_SCANCODE_E) : 0);
+            tg[2] = ax(SDL_SCANCODE_R, SDL_SCANCODE_F);
+            tg[3] = ax(SDL_SCANCODE_T, SDL_SCANCODE_G);
+            tg[4] = pick(ax(SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT), letters ? ax(SDL_SCANCODE_A, SDL_SCANCODE_D) : 0);
         }
         for (int i = 0; i < 5; ++i) {
             double step = (tg[i] != 0 ? 3.0 : 5.0) * dt;
             key[i] += std::max(-step, std::min(step, tg[i] - key[i]));
         }
         for (double& p : pad) p = 0;
-        if (pad_dev) {
+        if (pad_dev && !input_blocked) {
             auto ax = [&](SDL_GameControllerAxis a) { double v = SDL_GameControllerGetAxis(pad_dev, a) / 32767.0; return std::fabs(v) < 0.12 ? 0.0 : v; };
             pad[0] = -ax(SDL_CONTROLLER_AXIS_LEFTY); pad[4] = -ax(SDL_CONTROLLER_AXIS_LEFTX);
             pad[2] = -ax(SDL_CONTROLLER_AXIS_RIGHTY); pad[1] = -ax(SDL_CONTROLLER_AXIS_RIGHTX);
@@ -128,6 +207,7 @@ struct Fleet {
 
     // ------------------------------------------------------------------ physics (fixed 200 Hz steps, independent of the frame rate)
     void update(double dt, double sim_time, const Water& water, const Current& cur, const WaveField& waves, const Terrain& T) {
+        if (paused) return;                                           // frozen while the Designer is open (see DesignerHub::pause_sim)
         read_input(dt, !ImGui::GetIO().WantCaptureKeyboard);
         for (size_t i = 0; i < units.size(); ++i) {
             Unit& u = units[i]; Vehicle& v = u.veh;
@@ -196,10 +276,11 @@ struct Fleet {
             u1i(prog, "uMesh", u.model);
             Mat4 body = mat_from(v.q, v.p);
             for (const VPart& p : vm.parts) {
+                if (u.stl >= 0 && !u.designed && !stl_show_act && p.kind != 0) continue;
                 Mat4 mdl = body;
                 if (p.kind != 0) {
                     double ang = 0;
-                    if (p.kind == 1 && p.index >= 0 && p.index < (int)v.s.fins.size()) { const Fin& f = v.s.fins[p.index]; ang = f.sign * v.defl[f.group] * f.max_defl; }
+                    if (p.kind == 1 && p.index >= 0 && p.index < (int)v.s.fins.size()) { const Fin& f = v.s.fins[p.index]; ang = v.fin_delta(f); }
                     if (p.kind == 2) ang = v.prop_angle;
                     Q r = qaxis(p.axis, ang); V3 h = p.hinge, hh = h - qrot(r, h);
                     mdl = mul(body, mat_from(r, hh));
@@ -218,7 +299,7 @@ struct Fleet {
         ImGui::SetNextWindowBgAlpha(0.88f);
         ImGui::Begin("Vehicles");
         ImGui::PushItemWidth(190);
-        ImGui::Combo("Model", &deploy_model, MODEL_NAMES, MODEL_COUNT);
+        if (MODEL_CHOICE) ImGui::Combo("Model", &deploy_model, MODEL_NAMES, MODEL_COUNT); else deploy_model = M_TORPEDO;
         ImGui::SliderFloat("Deploy depth (m)", &deploy_depth, 0.0f, 60.0f);
         if (deploy_model == M_STL) {
             ImGui::InputText("STL file", stl_path, sizeof stl_path);
@@ -228,8 +309,20 @@ struct Fleet {
             ImGui::TextDisabled("A ready-made test file is in the models folder (test_auv.stl).");
         }
         if (ImGui::Button("Deploy in front of the camera")) deploy(deploy_model, cam_pos, cam_yaw, T);
-        ImGui::SameLine(); if (ImGui::Button("Remove selected")) remove_active();
-        ImGui::SameLine(); if (ImGui::Button("Remove all")) { units.clear(); active = -1; cam_mode = 0; }
+        if (ImGui::CollapsingHeader("Vehicle library (saved designs, real vehicles)", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (lib.items.empty()) refresh_designs();
+            auto getter = [](void* d, int i, const char** out) { *out = ((std::vector<dcore::LibEntry>*)d)->at(i).label.c_str(); return true; };
+            ImGui::Combo("Vehicle", &lib_sel, getter, &lib.items, (int)lib.items.size());
+            if (lib_sel >= 0 && lib_sel < (int)lib.items.size()) {
+                const dcore::LibEntry& e = lib.items[lib_sel];
+                if (e.kind != dcore::LibEntry::Saved) { const real::Info& ri = real::info(e.real_id); ImGui::TextDisabled("%.1f kg, speed %.1f to %.1f m/s, data: %s", ri.mass_pub, ri.v_lo, ri.v_hi, ri.licence);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\nEstimated: %s", ri.source, ri.estimated); }
+                if (e.kind == dcore::LibEntry::DeployOnly) ImGui::TextDisabled("Deploy only: the Designer cannot edit a vectored-thruster ROV.");
+            }
+            if (ImGui::Button("Deploy")) deploy_library(lib_sel, cam_pos, cam_yaw, T);
+            ImGui::SameLine(); if (ImGui::Button("Designer (F2)")) { if (open_designer) open_designer(lib_sel); }
+            ImGui::SameLine(); if (ImGui::SmallButton("Refresh list")) refresh_designs();
+        }
         if (!msg.empty()) ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.0f, 1), "%s", msg.c_str());
         if (!units.empty()) {
             ImGui::Separator(); ImGui::Text("In the water (click to control):");
@@ -247,7 +340,7 @@ struct Fleet {
         if (cam_mode == 1) ImGui::SliderFloat("Follow distance x", &chase_scale, 0.3f, 4.0f);
         ImGui::Checkbox("Vehicle lamp", &lamp_on);
         ImGui::TextWrapped("%s", v.s.note.c_str());
-        ImGui::TextDisabled("Keys: Up/Down surge | Left/Right turn | R/F up/down | T/G nose up/down | Z/X sideways%s", pad_dev ? " | gamepad connected" : "");
+        ImGui::TextDisabled("Keys: W/S or Up/Down surge | A/D or Left/Right turn | Q/E or Z/X sideways | R/F up/down | T/G nose up/down%s", pad_dev ? " | gamepad connected" : "");
 
         if (ImGui::CollapsingHeader("Commands", ImGuiTreeNodeFlags_DefaultOpen)) {
             const char* names[5] = {"Surge (forward/back)", "Sway (sideways)", "Heave (up/down)", "Pitch (nose up/down)", "Yaw (turn left/right)"};
@@ -287,12 +380,13 @@ struct Fleet {
             if (ImGui::SliderFloat("Thruster power x", &ts, 0.2f, 3.0f)) v.thrust_scale = ts;
             if (ImGui::SliderFloat("Centre of gravity up (m)", &cg, -0.1f, 0.1f)) v.cg_lift = cg;
             ImGui::TextDisabled("Gravity %.5f m/s2, mass and volume give the buoyancy. Heavier water (deep, cold, salty) lifts it more.", 9.80665);
-            if (ImGui::Button("Back to model defaults")) { Spec d = make_spec(u->model); if (u->stl < 0) { v.s = d; v.drag_scale = v.am_scale = v.thrust_scale = 1; v.cg_lift = 0; v.rebuild(); } }
+            if (ImGui::Button("Back to model defaults")) { Spec d = make_spec_ex(u->model); if (u->stl < 0) { v.s = d; v.drag_scale = v.am_scale = v.thrust_scale = 1; v.cg_lift = 0; v.rebuild(); } }
         }
         (void)water;
         ImGui::PopItemWidth(); ImGui::End();
 
-        // heads-up display, bottom centre
+        // heads-up display, bottom centre (hidden while the Designer covers the screen)
+        if (input_blocked) return;
         char buf[200]; std::snprintf(buf, sizeof buf, "#%d %s   HDG %03.0f   DEPTH %.1f m   ALT %.1f m   SPEED %.2f m/s   PITCH %+.0f", u->id, v.s.name.c_str(), hdg, depth, alt, len(v.v), pt * 57.29578);
         ImVec2 ts = ImGui::CalcTextSize(buf); ImDrawList* dl = ImGui::GetForegroundDrawList();
         ImVec2 a((io.DisplaySize.x - ts.x) * 0.5f, io.DisplaySize.y - ts.y - 24);

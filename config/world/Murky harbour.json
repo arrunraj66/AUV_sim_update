@@ -1,0 +1,36 @@
+{
+  "chop": 0.550000012,
+  "coral": 0,
+  "current": {
+    "decay": 60,
+    "dir_deg": 90,
+    "speed": 0.1
+  },
+  "floor_depth": 12,
+  "gamma": 3.3,
+  "grass": 1,
+  "hs": 0.1,
+  "reef_half": 140,
+  "reef_seed": 1,
+  "relief": 0.6,
+  "rock": 1,
+  "sea_state": 1,
+  "spectrum": 0,
+  "spread": 4,
+  "sun_azim": 20,
+  "sun_elev": 45,
+  "terrain_seed": 1,
+  "tp": 3,
+  "water": {
+    "clarity": 6,
+    "deep_sal": 12,
+    "deep_temp": 5,
+    "halocline": 200,
+    "surface_sal": 7,
+    "surface_temp": 12,
+    "thermocline": 25
+  },
+  "wave_dir_deg": 0,
+  "wave_seed": 1,
+  "whitecaps": 1
+}

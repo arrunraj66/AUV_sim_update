@@ -1,0 +1,13 @@
+{
+  "name": "Mini AUV 0.9 m",
+  "hull": {"L": 0.9, "D": 0.12, "nose_frac": 0.14, "tail_frac": 0.32, "nose_kind": 0, "tail_end": 0.35, "material": 0, "rated_depth": 50, "trim": 0.02},
+  "equipment": {"battery_Wh": 200, "pack_Wh_per_kg": 150, "payload_kg": 0.2, "electronics_kg": 0.6, "hotel_W": 20, "mast": true, "bus_V": 14.8, "cell_Ah": 3, "cell_maxC": 2},
+  "mission": {"v_cruise": 1, "v_max": 1.5, "water": 0, "temp": 15, "salinity": 35},
+  "sensors": ["imu", "depth", "camera"],
+  "fins": [
+    {"on": true, "count": 4, "angle0": 0, "x": -0.35, "cr": 0.08, "ct": 0.05, "span": 0.06, "sweep": 0.03, "tc": 0.12, "control": true, "max_defl": 25, "stock_mat": 0}
+  ],
+  "props": [
+    {"role": 0, "D": 0.11, "pd": 1.2, "blades": 3, "ducted": true, "model": 1, "ear": 0.55, "contra": false, "blades2": 4, "d2_ratio": 0.94, "rpm": 1500, "auto_rpm": true, "x": 0, "y": 0, "z": 0, "shaft_mat": 0, "keyway": true, "bore": 0}
+  ]
+}

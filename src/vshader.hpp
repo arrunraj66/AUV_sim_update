@@ -36,6 +36,7 @@ void main() {
     else if (t == 5) { alb = vec3(0.04, 0.22, 0.75); gloss = 0.7; }
     else if (t == 6) { alb = vec3(0.03, 0.05, 0.07); gloss = 1.0; }
     else if (t == 7) { alb = vec3(0.85, 0.05, 0.04); gloss = 0.6; }
+    else if (t == 9) { alb = vec3(0.95, 0.72, 0.20) * (0.92 + 0.16 * grain); gloss = 0.7; }       // brass / bronze propeller
     else             { alb = uStlCol * (0.92 + 0.12 * grain); gloss = 0.6; }
 
     float dF = max(-vPos.z, 0.0);

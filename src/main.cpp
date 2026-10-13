@@ -6,12 +6,17 @@
 #include "terrain.hpp"
 #include "reef.hpp"
 #include "fleet.hpp"
+#include "config_ui.hpp"
+#include "cockpit.hpp"
+#include "designer_hub.hpp"
+#include "propwash.hpp"
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_opengl3.h"
 #include <cstring>
 #include <cfloat>
 #include <algorithm>
+#include <array>
 
 static const float PI = 3.14159265f;
 
@@ -25,11 +30,31 @@ struct Camera {                 // a free-flying camera: it can dive and look an
 
 int main(int argc, char** argv) {
     // optional test arguments: --view N   --sea N   --shot file.ppm
-    int start_view = 0, start_sea = 3; const char* shot = nullptr;
+    int start_view = 0, start_sea = 3; const char* shot = nullptr; int cfg_style = -1, cfg_page = -1; bool cfg_start = false; int ck_preset = -1; bool ck_edit = false;
+    int design_n = -1, real_n = -1; bool surge_set = false; const char* gui_shot = nullptr; int gui_shot_frame = 12, esc_at = -1, gframe = 0; int dlib = -1; float chase_arg = -1, camyaw_arg = -999, campitch_arg = -999; std::vector<int> f2_at; std::vector<std::array<int, 3>> click_at; bool open_designer_at_start = false; double surge_cmd = 0, shot_sim = -1, tscale = -1; bool design_done = false; int loop_n = 0;   // test: deploy design N, hold surge, speed up time, shoot at sim time
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--view") && i + 1 < argc) start_view = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--sea") && i + 1 < argc) start_sea = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) shot = argv[++i];
+        else if (!std::strcmp(argv[i], "--cfgstyle") && i + 1 < argc) cfg_style = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--cfgpage") && i + 1 < argc) cfg_page = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--cfgstart")) cfg_start = true;
+        else if (!std::strcmp(argv[i], "--ckpreset") && i + 1 < argc) ck_preset = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--ckedit")) ck_edit = true;
+        else if (!std::strcmp(argv[i], "--design") && i + 1 < argc) design_n = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--real") && i + 1 < argc) real_n = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--guishot") && i + 1 < argc) gui_shot = argv[++i];           // test: save the whole window (with the GUI) at frame N and quit
+        else if (!std::strcmp(argv[i], "--guishotframe") && i + 1 < argc) gui_shot_frame = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--f2at") && i + 1 < argc) { for (char* t = std::strtok(argv[++i], ","); t; t = std::strtok(nullptr, ",")) f2_at.push_back(std::atoi(t)); }   // test: press F2 at these frames
+        else if (!std::strcmp(argv[i], "--clickat") && i + 1 < argc) { int f = 0, x = 0, y = 0; if (std::sscanf(argv[++i], "%d,%d,%d", &f, &x, &y) == 3) click_at.push_back({f, x, y}); }   // test: click at window pixel (x, y) at frame f
+        else if (!std::strcmp(argv[i], "--dlib") && i + 1 < argc) dlib = std::atoi(argv[++i]);            // test: open the Designer with this library entry at frame 4
+        else if (!std::strcmp(argv[i], "--chase") && i + 1 < argc) chase_arg = (float)std::atof(argv[++i]);          // test: follow-camera distance multiplier (0.3 = close)
+        else if (!std::strcmp(argv[i], "--camyaw") && i + 1 < argc) camyaw_arg = (float)std::atof(argv[++i]);        // test: orbit the follow camera (degrees, relative to the vehicle's heading)
+        else if (!std::strcmp(argv[i], "--campitch") && i + 1 < argc) campitch_arg = (float)std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--escat") && i + 1 < argc) esc_at = std::atoi(argv[++i]);    // test: press Escape at this frame
+        else if (!std::strcmp(argv[i], "--surge") && i + 1 < argc) surge_cmd = std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--shotsim") && i + 1 < argc) shot_sim = std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--timescale") && i + 1 < argc) tscale = std::atof(argv[++i]);
     }
     if (SDL_Init(SDL_INIT_VIDEO) != 0) { SDL_Log("SDL error: %s", SDL_GetError()); return 1; }
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
@@ -53,6 +78,7 @@ int main(int argc, char** argv) {
 
     IMGUI_CHECKVERSION(); ImGui::CreateContext(); ImGui::StyleColorsDark();
     ImGui::GetIO().IniFilename = nullptr;
+    Cockpit cockpit; cockpit.load_fonts(); Cockpit::apply_theme();
     ImGui_ImplSDL2_InitForOpenGL(win, gl); ImGui_ImplOpenGL3_Init("#version 330");
 
     // ---- GPU programs and meshes ----
@@ -98,6 +124,16 @@ int main(int argc, char** argv) {
     ReefParams rp; rp.seed = 1; rp.coral = 1.5f;
     reef.generate(terrain, rp);
     Fleet fleet; fleet.init();
+    PropWash wash; wash.init();                         // bubble wake behind working propellers and thrusters
+    ConfigUI cfg; cfg.fleet = &fleet;
+    cfg.w = {&terrain, &rp, &waves, &water, &current, &sun_elev, &sun_azim, &chop, &foam_amount, &sea_state, &spectrum_type, &terrain_seed};
+    cfg.live = {&lamp_on, &particles_on, &lamp_power, &cam_speed, &time_scale};
+    cfg.init("config"); cockpit.init("config");
+    DesignerHub hub; hub.init(&fleet, !shot && !gui_shot);          // the Designer: top-level overlay, F2, saved state in config/designer_state.json
+    if (ck_preset >= 0) cockpit.apply_preset(std::max(0, std::min(3, ck_preset)));
+    cockpit.edit = ck_edit;
+    if (cfg_style >= 0) cfg.style = std::max(0, std::min(2, cfg_style));
+    if (cfg_page >= 0) cfg.page = std::max(0, std::min(ConfigUI::PAGES - 1, cfg_page));
 
     Camera cam;
     auto find_reef = [&]() {          // fly to the busiest patch of coral
@@ -132,10 +168,15 @@ int main(int argc, char** argv) {
         float dt = (float)((now - last) / (double)SDL_GetPerformanceFrequency()); last = now;
         dt = std::min(dt, 0.1f);
 
+        ++gframe;
+        for (int f : f2_at) if (f == gframe) { SDL_Event ev; SDL_zero(ev); ev.type = SDL_KEYDOWN; ev.key.state = SDL_PRESSED; ev.key.keysym.scancode = SDL_SCANCODE_F2; ev.key.keysym.sym = SDLK_F2; SDL_PushEvent(&ev); }   // test: real key events
+        if (gframe == 4 && dlib >= 0) hub.open_with(dlib);
+        if (gframe == esc_at) { SDL_Event ev; SDL_zero(ev); ev.type = SDL_KEYDOWN; ev.key.state = SDL_PRESSED; ev.key.keysym.scancode = SDL_SCANCODE_ESCAPE; ev.key.keysym.sym = SDLK_ESCAPE; SDL_PushEvent(&ev); }
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             ImGui_ImplSDL2_ProcessEvent(&e);
             fleet.on_event(e);
+            if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F2 && !e.key.repeat) hub.hotkey_f2();      // ignored while a text field wants the keys
             ImGuiIO& io = ImGui::GetIO();
             if (e.type == SDL_QUIT) running = false;
             if (e.type == SDL_MOUSEBUTTONDOWN && !io.WantCaptureMouse) dragging = true;
@@ -150,7 +191,7 @@ int main(int argc, char** argv) {
             }
         }
         // keyboard: W/S forward/back along where you look, A/D sideways, Space/C (or E/Q) up/down
-        if (!ImGui::GetIO().WantCaptureKeyboard && fleet.cam_mode == 0) {
+        if (!ImGui::GetIO().WantCaptureKeyboard && !hub.is_open() && fleet.cam_mode == 0) {
             const Uint8* k = SDL_GetKeyboardState(nullptr);
             float sp = cam_speed * (k[SDL_SCANCODE_LSHIFT] ? 5.f : 1.f) * dt;
             Vec3f f = cam.forward(); Vec3f rt = {std::sin(cam.yaw), -std::cos(cam.yaw), 0};
@@ -161,9 +202,10 @@ int main(int argc, char** argv) {
             if (k[SDL_SCANCODE_SPACE] || k[SDL_SCANCODE_E]) cam.pos.z += sp;
             if (k[SDL_SCANCODE_C] || k[SDL_SCANCODE_Q]) cam.pos.z -= sp;
         }
-        sim_time += dt * time_scale;
+        if (!fleet.paused) sim_time += dt * time_scale;
         fleet.update(dt * time_scale, sim_time, water, current, waves, terrain);
-        if (fleet.snap_cam) { cam.yaw = fleet.snap_yaw; cam.pitch = fleet.snap_pitch; fleet.snap_cam = false; }
+        if (!fleet.paused) wash.sim.update(dt * time_scale, fleet, [&](double depth, double& vx, double& vy) { current.at(depth, vx, vy); });
+        if (fleet.snap_cam) { cam.yaw = fleet.snap_yaw; cam.pitch = fleet.snap_pitch; fleet.snap_cam = false; if (camyaw_arg > -900) cam.yaw += camyaw_arg * 3.14159265f / 180.f; if (campitch_arg > -900) cam.pitch = campitch_arg * 3.14159265f / 180.f; }
         { Vec3f fp; if (fleet.follow(cam.yaw, cam.pitch, fp)) cam.pos = fp; }
 
         // keep the camera inside the world and above the sea bed
@@ -174,11 +216,44 @@ int main(int argc, char** argv) {
 
         // ---------------------------------------------------------------- GUI
         bool regen = false, rebuild_terrain = false;
-        ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplSDL2_NewFrame(); ImGui::NewFrame();
-        ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(480, 780), ImGuiCond_FirstUseEver);
+        ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplSDL2_NewFrame();
+        for (auto& c : click_at) {   // test: a click through ImGui's input queue (the SDL backend re-reads the real pointer every frame, so the position is queued after it)
+            ImGuiIO& tio = ImGui::GetIO();
+            if (gframe >= c[0] && gframe <= c[0] + 3) tio.AddMousePosEvent((float)c[1], (float)c[2]);
+            if (gframe == c[0] + 1) tio.AddMouseButtonEvent(0, true);
+            if (gframe == c[0] + 2) tio.AddMouseButtonEvent(0, false);
+        }
+        ImGui::NewFrame();
+        bool in_ck = cfg.run_cockpit && fleet.act();
+        if (cfg.run_cockpit && !fleet.act()) cfg.run_cockpit = false;
+        if (in_ck) {
+            bool designer_req = false;
+            CkCtx ctx{&fleet, &terrain, &current, &water, &cfg.unit_sensors, &lamp_on, &designer_req};
+            cockpit.update(dt * time_scale, ctx); cockpit.draw(ctx, sim_time);
+            if (designer_req) hub.open_with(-1);
+            if (cockpit.want_setup) { cockpit.want_setup = false; cfg.run_cockpit = false; cfg.setup_open = true; cfg.preview = false; }
+        } else cfg.draw(cam.pos, cam.yaw, terrain);
+        if (cfg.regen) { regen = true; cfg.regen = false; }
+        if (cfg.rebuild_terrain) { rebuild_terrain = true; cfg.rebuild_terrain = false; }
+        if (cfg_start) { cfg_start = false; cfg.start(cam.pos, cam.yaw); }
+        if (tscale >= 0) time_scale = (float)tscale;
+        if (chase_arg > 0) fleet.chase_scale = chase_arg;
+        if (surge_cmd != 0 && fleet.act() && !surge_set) { fleet.act()->ui[0] = surge_cmd; surge_set = true; }          // test: hold the surge slider on whatever vehicle is deployed
+        if ((design_n >= 0 || real_n >= 0) && !design_done && ++loop_n >= 2) {       // test options: deploy the Nth designed AUV, or the Nth real vehicle
+            design_done = true; fleet.refresh_designs();
+            bool ok = real_n >= 0 ? fleet.deploy_real(real_n, cam.pos, cam.yaw, terrain)
+                                  : (design_n < (int)fleet.design_files.size() && fleet.deploy_design_file(fleet.design_files[design_n], cam.pos, cam.yaw, terrain));
+            if (ok) { if (fleet.act()) fleet.act()->ui[0] = surge_cmd; }
+            else std::fprintf(stderr, "vehicle could not be deployed: %s\n", fleet.msg.c_str());
+        }
+        bool live_open = in_ck ? cockpit.show_live : !cfg.hides_3d();
+        float cdepth = -cam.pos.z;
+        if (live_open) {
+        ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x - 400, 56), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(390, 620), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowCollapsed(true, ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowBgAlpha(0.88f);
-        ImGui::Begin("Sea controls");
+        ImGui::Begin("Live tuning (camera and sea)");
         ImGui::PushItemWidth(210);
         ImGui::Text("%.0f FPS   |   %d reef objects (%d corals)", ImGui::GetIO().Framerate, reef.total(), reef.coral_count());
         ImGui::TextDisabled("Drag mouse = look | W/S/A/D = fly | Space/C = up/down | Shift = fast | wheel = speed");
@@ -189,11 +264,10 @@ int main(int argc, char** argv) {
         if (ImGui::SmallButton("Mid-water")) set_view(3); ImGui::SameLine();
         if (ImGui::SmallButton("Reef")) set_view(4); ImGui::SameLine();
         if (ImGui::SmallButton("Look up")) set_view(5);
-        float cdepth = -cam.pos.z;
         if (ImGui::SliderFloat("Camera depth (m)", &cdepth, -20.0f, terrain.floor_depth + 5.0f)) cam.pos.z = -cdepth;
         ImGui::SliderFloat("Camera speed (m/s)", &cam_speed, 0.2f, 100.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
         ImGui::Checkbox("Vehicle lamp", &lamp_on); ImGui::SameLine();
-        ImGui::Checkbox("Floating particles", &particles_on);
+        ImGui::Checkbox("Floating particles", &particles_on); ImGui::SameLine(); ImGui::Checkbox("Propeller bubbles", &wash.on);
         if (lamp_on) ImGui::SliderFloat("Lamp power", &lamp_power, 1.0f, 40.0f);
         ImGui::SliderFloat("Time speed", &time_scale, 0.0f, 5.0f);
 
@@ -283,7 +357,9 @@ int main(int argc, char** argv) {
         }
         ImGui::PopItemWidth();
         ImGui::End();
-        fleet.gui(cam.pos, cam.yaw, terrain, lamp_on, water);
+        }
+        if (!in_ck && cfg.show_vehicles_window()) fleet.gui(cam.pos, cam.yaw, terrain, lamp_on, water);
+        hub.cam_pos = cam.pos; hub.cam_yaw = cam.yaw; hub.terrain = &terrain; hub.draw(in_ck);        // the Designer overlay, over everything else
 
         if (rebuild_terrain) terrain.build(terrain_seed);
         if (regen) reef.generate(terrain, rp);
@@ -292,7 +368,7 @@ int main(int argc, char** argv) {
         int w, h; SDL_GL_GetDrawableSize(win, &w, &h);
 
         // dive gauge in the top-right corner
-        {
+        if (!in_ck && !hub.is_open()) {
             double rho, p; water.state_at(std::max(0.f, cdepth), rho, p);
             char buf[160];
             std::snprintf(buf, sizeof buf, "Depth %.1f m    Altitude %.1f m    %.1f C    %.2f bar",
@@ -373,6 +449,7 @@ int main(int argc, char** argv) {
 
         // 3b. vehicles
         common(fleet.prog); vp_uniform(fleet.prog); lamp_uniforms(fleet.prog); fleet.draw();
+        common(wash.prog); vp_uniform(wash.prog); wash.draw((float)h);                 // 3c. propeller bubbles
 
         // 4. floating particles
         if (underwater && particles_on) {
@@ -402,17 +479,25 @@ int main(int argc, char** argv) {
         sea_mesh.draw();
         glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST);
 
-        if (shot && ++frames == 3) {      // test mode: save the 3D picture (without the GUI) and quit
+        if (shot && (shot_sim >= 0 ? ((design_done || surge_set) && sim_time >= shot_sim) : ++frames == 3)) {      // test mode: save the 3D picture (without the GUI) and quit
             std::vector<unsigned char> px((size_t)w * h * 3);
             glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
-            FILE* f = std::fopen(shot, "wb"); std::fprintf(f, "P6\n%d %d\n255\n", w, h);
+            FILE* f = std::fopen(shot, "wb"); if (!f) { std::fprintf(stderr, "cannot write %s\n", shot); f = std::fopen("/dev/null", "wb"); } std::fprintf(f, "P6\n%d %d\n255\n", w, h);
             for (int y = h - 1; y >= 0; --y) std::fwrite(&px[(size_t)y * w * 3], 1, (size_t)w * 3, f);
             std::fclose(f); running = false;
+            if (Unit* u = fleet.act()) { double yw, pt, rl; u->veh.heading_pitch_roll(yw, pt, rl); std::printf("%s: sim time %.1f s, position (%.1f, %.1f, %.1f), speed %.2f m/s, depth %.1f m, pitch %.1f deg, roll %.1f deg, energy left %.1f Wh\n", u->veh.s.name.c_str(), sim_time, u->veh.p.x, u->veh.p.y, u->veh.p.z, len(u->veh.v), -u->veh.p.z, pt * 57.3, rl * 57.3, u->veh.energy_Wh); }
         }
 
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        if (gui_shot && gframe >= gui_shot_frame) {          // test mode: the whole window including the GUI
+            std::vector<unsigned char> px((size_t)w * h * 3); glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+            FILE* f = std::fopen(gui_shot, "wb"); if (!f) { std::fprintf(stderr, "cannot write %s\n", gui_shot); f = std::fopen("/dev/null", "wb"); } std::fprintf(f, "P6\n%d %d\n255\n", w, h);
+            for (int y = h - 1; y >= 0; --y) std::fwrite(&px[(size_t)y * w * 3], 1, (size_t)w * 3, f);
+            std::fclose(f); running = false; std::printf("designer %s, in cockpit %d, vehicles %d\n", hub.is_open() ? "OPEN" : "closed", (int)in_ck, (int)fleet.units.size());
+        }
         SDL_GL_SwapWindow(win);
     }
+    hub.save_state();
     ImGui_ImplOpenGL3_Shutdown(); ImGui_ImplSDL2_Shutdown(); ImGui::DestroyContext();
     SDL_GL_DeleteContext(gl); SDL_DestroyWindow(win); SDL_Quit();
 }

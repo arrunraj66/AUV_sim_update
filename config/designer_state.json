@@ -1,0 +1,11 @@
+{
+  "design": "{\n  \"name\": \"MBARI Tethys LRAUV (copy)\",\n  \"hull\": {\"L\": 2.06, \"D\": 0.416, \"nose_frac\": 0.12, \"tail_frac\": 0.45, \"nose_kind\": 0, \"tail_end\": 0.25, \"material\": 0, \"rated_depth\": 300, \"trim\": 0.02},\n  \"equipment\": {\"battery_Wh\": 5760, \"pack_Wh_per_kg\": 150, \"payload_kg\": 3, \"electronics_kg\": 2.5, \"hotel_W\": 28.8, \"mast\": false, \"bus_V\": 24, \"cell_Ah\": 3, \"cell_maxC\": 2},\n  \"mission\": {\"v_cruise\": 1, \"v_max\": 1.5, \"water\": 0, \"temp\": 15, \"salinity\": 35},\n  \"sensors\": [\"imu\", \"compass\", \"depth\"],\n  \"fins\": [\n    {\"on\": true, \"count\": 4, \"angle0\": 0, \"x\": -0.8946204904, \"cr\": 0.14, \"ct\": 0.08, \"span\": 0.111, \"sweep\": 0.02, \"tc\": 0.12, \"control\": true, \"max_defl\": 25, \"stock_mat\": 0}\n  ],\n  \"props\": [\n    {\"role\": 0, \"D\": 0.2, \"pd\": 1.2, \"blades\": 3, \"ducted\": false, \"model\": 1, \"ear\": 0.55, \"contra\": false, \"blades2\": 4, \"d2_ratio\": 0.94, \"rpm\": 1500, \"auto_rpm\": true, \"x\": 0, \"y\": 0, \"z\": 0, \"shaft_mat\": 0, \"keyway\": true, \"bore\": 0}\n  ]\n}\n",
+  "designs_dir": "/home/robotics/Documents/auvsim_new/config/designs",
+  "library_entry": "MBARI Tethys LRAUV",
+  "open": true,
+  "overrides_on": true,
+  "pause_while_open": true,
+  "real_base": 1,
+  "result_open": true,
+  "tab": -1
+}

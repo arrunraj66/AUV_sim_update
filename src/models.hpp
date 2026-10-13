@@ -6,6 +6,8 @@
 #include "vehicle.hpp"
 
 enum { M_TORPEDO = 0, M_HOVER, M_GLIDER, M_SCOUT, M_STL, MODEL_COUNT };
+// Paused: set to true to bring back the choice between the different AUV models. While false, every vehicle is the Torpedo AUV.
+static constexpr bool MODEL_CHOICE = false;
 static const char* MODEL_NAMES[MODEL_COUNT] = {
     "Torpedo AUV (REMUS-100 class)", "Hover ROV/AUV (BlueROV2 class)", "Buoyancy glider (Slocum class)",
     "Scout AUV (6 thrusters)", "Custom STL model"};

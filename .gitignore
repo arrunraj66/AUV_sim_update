@@ -11,3 +11,6 @@ imgui.ini
 .idea/
 *.swp
 .DS_Store
+
+# Auto snapshots of successful builds
+snapshots/

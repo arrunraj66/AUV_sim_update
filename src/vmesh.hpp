@@ -103,6 +103,53 @@ static void full_hull(Mesh& m, float xa, float xb, int rings, std::function<floa
 static void finish(VPart& p, bool smooth = true) { if (smooth) p.mesh.smooth_normals(); }
 static VPart& add_part(VModel& vm, int kind = 0, int index = -1) { vm.parts.emplace_back(); vm.parts.back().kind = kind; vm.parts.back().index = index; return vm.parts.back(); }
 
+// A marine propeller along the x axis, centred at x0, rotating about +x (right hand), pushing water toward -x:
+//   * a hub with a pointed spinner on the aft side
+//   * Z blades. Each blade is built from sections at 14 radii: constant pitch (the section angle follows tan(phi) = P / (2 pi r), so the blade twists from root to tip),
+//     an elliptical chord outline whose size comes from the blade area ratio, a flat pressure face and a rounded back, and skew (the blade sweeps back against the rotation
+//     toward the tip, like the large skewed propellers of submarines).
+// hand = +1 right-handed, -1 left-handed (the rear propeller of a contra-rotating pair).
+// the outward normal of the triangle (a, b, c) with the orientation the caller's winding gives; used to orient blade quads consistently
+static Vec3f nb_dir(const Mesh& m, int a, int b, int c) { Vec3f n = cross(sub(m.pos(b), m.pos(a)), sub(m.pos(c), m.pos(a))); float l = std::sqrt(dot(n, n)); return l > 1e-12f ? Vec3f{n.x / l, n.y / l, n.z / l} : Vec3f{1, 0, 0}; }
+static void add_propeller(Mesh& m, float x0, float R, float hubR, int Z, float pitch_ratio, float ear, float skew_deg, float tone, int hand = 1) {
+    const int NR = 14, NS = 10; const float PI2 = 6.2831853f;
+    // hub: a short drum with a pointed spinner behind it
+    add_tube(m, P3(x0 + 1.1 * hubR, 0, 0), P3(x0 - 0.9 * hubR, 0, 0), hubR, hubR, 20, tone, tone, false);
+    add_tube(m, P3(x0 - 0.9 * hubR, 0, 0), P3(x0 - 2.6 * hubR, 0, 0), hubR, 0.08f * hubR, 20, tone, tone, true, tone);
+    add_tube(m, P3(x0 + 1.1 * hubR, 0, 0), P3(x0 + 1.15 * hubR, 0, 0), hubR, 0.6f * hubR, 20, tone, tone, true, tone);
+    const float P = pitch_ratio * 2.f * R, span = R - hubR * 0.9f;
+    float cmax = std::min(ear * 3.14159f * R * R / (Z * span * 0.60f), 1.1f * R);
+    for (int k = 0; k < Z; ++k) {
+        float th0 = PI2 * k / Z; std::vector<int> back[NR + 1], face[NR + 1]; Vec3f nbs[NR + 1], rads[NR + 1];
+        for (int j = 0; j <= NR; ++j) {
+            float rho = (float)j / NR, r = hubR * 0.9f + span * rho;
+            float ell = std::sqrt(std::max(0.f, 1.f - std::pow((rho - 0.52f) / 0.56f, 2.f)));
+            float chord = cmax * (0.30f + 0.70f * ell) * (rho > 0.82f ? 1.f - 0.80f * (rho - 0.82f) / 0.18f : 1.f);       // widest at about 0.5 R, narrow tip
+            float phi = std::atan(P / (PI2 * r));                                              // pitch angle: steep near the root, flat near the tip
+            float thc = th0 - hand * (skew_deg * 3.14159265f / 180.f) * rho * rho;             // skew: the section centre trails behind with radius
+            Vec3f rad = {0, std::cos(thc), std::sin(thc)}, tan_ = {0, -hand * std::sin(thc), hand * std::cos(thc)}, ax = {1, 0, 0};
+            Vec3f d = vmul(vadd(vmul(tan_, std::cos(phi)), vmul(ax, std::sin(phi))), -1.f);   // leading edge -> trailing edge: the trailing edge is aft
+            Vec3f nb = vadd(vmul(tan_, -std::sin(phi)), vmul(ax, std::cos(phi)));             // normal of the back (suction) side, toward +x
+            Vec3f C = vadd(Vec3f{x0, 0, 0}, vmul(rad, r)); nbs[j] = nb; rads[j] = rad;
+            float tmax = chord * 0.10f * (1.f - 0.78f * rho) + 0.0012f * R / 0.07f;
+            for (int i = 0; i <= NS; ++i) {
+                float s = (float)i / NS, t = tmax * std::pow(std::sin(3.14159265f * s), 0.75f) * (1.f - 0.35f * s);
+                Vec3f Pf = vadd(C, vmul(d, chord * (s - 0.5f)));
+                face[j].push_back(m.add(Pf, tone)); back[j].push_back(m.add(vadd(Pf, vmul(nb, t)), tone));
+            }
+        }
+        for (int j = 0; j < NR; ++j) for (int i = 0; i < NS; ++i) {
+            Vec3f wb = vadd(nbs[j], nbs[j + 1]), wf = vmul(wb, -1.f);       // the back faces +x (outward), the pressure face faces aft
+            m.tri(back[j][i], back[j][i + 1], back[j + 1][i + 1], wb); m.tri(back[j][i], back[j + 1][i + 1], back[j + 1][i], wb);
+            m.tri(face[j][i], face[j][i + 1], face[j + 1][i + 1], wf); m.tri(face[j][i], face[j + 1][i + 1], face[j + 1][i], wf);
+        }
+        for (int i = 0; i < NS; ++i) {                                                             // close the tip
+            Vec3f w = rads[NR];                                              // the tip faces outward
+            m.tri(back[NR][i], back[NR][i + 1], face[NR][i + 1], w); m.tri(back[NR][i], face[NR][i + 1], face[NR][i], w);
+        }
+    }
+}
+
 // a fin as a turning part
 static void fin_part(VModel& vm, const Spec& s, int fi, float cr, float ct, float span, float thick, float tone, float sweep = 0) {
     const Fin& f = s.fins[fi];
@@ -129,20 +176,12 @@ static VModel build_torpedo(const Spec& s) {
     { VPart& p = add_part(vm); full_hull(p.mesh, -0.32f, 0.74f, 90, prof, 1, 1, 0); }       // yellow body
     { VPart& p = add_part(vm); full_hull(p.mesh, -0.66f, -0.32f, 30, prof, 1, 1, 1); }      // black tail cone
     { VPart& p = add_part(vm); add_tube(p.mesh, P3(0.797, 0, 0), P3(0.808, 0, 0), 0.022f, 0.022f, 16, 6, 6, true, 6); finish(p); }   // lamp / camera window
-    { VPart& p = add_part(vm);                                                              // hub, shroud, struts
-      add_tube(p.mesh, P3(-0.84, 0, 0), P3(-0.62, 0, 0), 0.034f, 0.034f, 16, 2, 2, true, 2);
-      add_tube(p.mesh, P3(-0.85, 0, 0), P3(-0.67, 0, 0), 0.108f, 0.108f, 40, 2, 2, false);
-      add_tube(p.mesh, P3(-0.85, 0, 0), P3(-0.84, 0, 0), 0.112f, 0.112f, 40, 7, 7, false);
-      for (int k = 0; k < 4; ++k) { float a = 0.7854f + 1.5708f * k; add_tube(p.mesh, P3(-0.70, 0.03f * std::cos(a), 0.03f * std::sin(a)), P3(-0.70, 0.108f * std::cos(a), 0.108f * std::sin(a)), 0.006f, 0.006f, 8, 2, 2); }
+    { VPart& p = add_part(vm);                                                              // propeller shaft stub (the propeller is open, like on most small AUVs: no shroud)
+      add_tube(p.mesh, P3(-0.84, 0, 0), P3(-0.62, 0, 0), 0.030f, 0.030f, 16, 2, 2, true, 2);
       finish(p); }
-    { VPart& p = add_part(vm, 2); p.hinge = {-0.78, 0, 0}; p.axis = {1, 0, 0};              // propeller
-      for (int k = 0; k < 3; ++k) {
-          float a = 6.2831853f * k / 3; Vec3f sd = {0, std::cos(a), std::sin(a)}, td = {0, -std::sin(a), std::cos(a)};
-          float c30 = 0.866f, s30 = 0.5f;
-          Vec3f nd = vadd(vmul(td, c30), vmul(Vec3f{1, 0, 0}, s30)), xd = vadd(vmul(Vec3f{1, 0, 0}, c30), vmul(td, -s30));
-          add_plate(p.mesh, vadd(Vec3f{-0.78f, 0, 0}, vmul(sd, 0.066f)), xd, sd, nd, 0.05f, 0.03f, 0.064f, 0.004f, 1);
-      } finish(p); }
-    for (int i = 0; i < 4; ++i) fin_part(vm, s, i, 0.22f, 0.14f, 0.16f, 0.012f, 1, -0.02f);
+    { VPart& p = add_part(vm, 2); p.hinge = {-0.78, 0, 0}; p.axis = {1, 0, 0};              // propeller: five skewed, twisted blades (REMUS: D 0.14 m)
+      add_propeller(p.mesh, -0.78f, 0.085f, 0.026f, 5, 1.1f, 0.62f, 28.f, 9); finish(p); }
+    for (int i = 0; i < 4; ++i) fin_part(vm, s, i, 0.094f, 0.061f, 0.0857f, 0.006f, 1, -0.01f);      // REMUS fin: Prestero Table 2.2 (S 6.65e-3 m2, span 0.0857 m)
     { VPart& p = add_part(vm);                                                              // mast, side-scan strips
       add_tube(p.mesh, P3(-0.28, 0, 0.085), P3(-0.28, 0, 0.22), 0.006f, 0.005f, 8, 1, 1);
       add_tube(p.mesh, P3(-0.28, 0, 0.22), P3(-0.28, 0, 0.245), 0.012f, 0.012f, 12, 7, 7, true, 7);
@@ -151,18 +190,25 @@ static VModel build_torpedo(const Spec& s) {
     return vm;
 }
 
+static void shift_mesh(Mesh& m, float dx, float dy, float dz) { for (auto& v : m.v) { v.p[0] += dx; v.p[1] += dy; v.p[2] += dz; } }
 static VModel build_hover(const Spec& s) {
     VModel vm;
+    // rounded slab: a super-ellipse outline (length 2a, width 2b) with an oval section of height 2c
+    auto slab = [&](VPart& p, float cx, float cz, float a, float b, float c, float tone) {
+        full_hull(p.mesh, -a, a, 40, [=](float x) { float u = std::min(1.f, std::fabs(x) / a); return b * std::pow(std::max(0.f, 1.f - u * u * u), 1.f / 3.f); }, 1, c / b, tone);
+        shift_mesh(p.mesh, cx, 0, cz);
+    };
+    { VPart& p = add_part(vm); slab(p, 0, 0.100f, 0.215f, 0.150f, 0.045f, 3); }             // foam float (rounded, white)
+    { VPart& p = add_part(vm); slab(p, 0, -0.118f, 0.205f, 0.155f, 0.008f, 2); }            // bottom plate (rounded, dark)
     { VPart& p = add_part(vm);
-      add_box(p.mesh, P3(0, 0, 0.105), P3(0.19, 0.14, 0.04), 3);                            // foam float
-      for (int sg = -1; sg <= 1; sg += 2) {                                                  // side frames (open, so you can see inside)
+      for (int sg = -1; sg <= 1; sg += 2) {                                                  // open side frames made of round rails
           float y = sg * 0.165f;
-          add_box(p.mesh, P3(0, y, 0.062), P3(0.22, 0.005, 0.014), 5); add_box(p.mesh, P3(0, y, -0.115), P3(0.22, 0.005, 0.014), 5);
-          add_box(p.mesh, P3(0.205, y, -0.03), P3(0.016, 0.005, 0.09), 5); add_box(p.mesh, P3(-0.205, y, -0.03), P3(0.016, 0.005, 0.09), 5);
-          add_box(p.mesh, P3(0, y, -0.03), P3(0.2, 0.004, 0.010), 5);
+          add_tube(p.mesh, P3(-0.21, y, 0.050), P3(0.21, y, 0.050), 0.009f, 0.009f, 14, 5, 5, true, 5);
+          add_tube(p.mesh, P3(-0.21, y, -0.112), P3(0.21, y, -0.112), 0.009f, 0.009f, 14, 5, 5, true, 5);
+          add_tube(p.mesh, P3(-0.21, y, -0.031), P3(0.21, y, -0.031), 0.006f, 0.006f, 12, 5, 5, true, 5);
+          for (int e = -1; e <= 1; e += 2) add_tube(p.mesh, P3(e * 0.21f, y, -0.112), P3(e * 0.21f, y, 0.050), 0.009f, 0.009f, 14, 5, 5, true, 5);
       }
-      add_box(p.mesh, P3(0, 0, -0.118), P3(0.2, 0.15, 0.006), 2);                           // bottom plate
-      add_box(p.mesh, P3(0.20, 0, -0.01), P3(0.006, 0.165, 0.11), 2); add_box(p.mesh, P3(-0.20, 0, -0.01), P3(0.006, 0.165, 0.11), 2);   // end frames
+      for (int e = -1; e <= 1; e += 2) add_tube(p.mesh, P3(e * 0.21f, -0.165, -0.04), P3(e * 0.21f, 0.165, -0.04), 0.008f, 0.008f, 12, 5, 5, true, 5);   // cross bars
       add_tube(p.mesh, P3(-0.17, 0, -0.005), P3(0.13, 0, -0.005), 0.08f, 0.08f, 32, 2, 2, true, 2);       // electronics tube
       add_tube(p.mesh, P3(-0.12, 0, -0.088), P3(0.12, 0, -0.088), 0.032f, 0.032f, 20, 2, 2, true, 2);     // battery tube
       for (int sg = -1; sg <= 1; sg += 2) add_tube(p.mesh, P3(0.233, sg * 0.075, 0.025), P3(0.246, sg * 0.075, 0.025), 0.022f, 0.022f, 14, 6, 6, true, 6);   // lights
